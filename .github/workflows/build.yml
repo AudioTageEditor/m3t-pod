@@ -1,0 +1,78 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Ambil isi repositori
+        uses: actions/checkout@v5
+
+      - name: Ekstrak ZIP proyek (bila diunggah sebagai ZIP)
+        run: |
+          set -euo pipefail
+          if [ -f settings.gradle.kts ]; then
+            echo "Proyek sudah berupa file biasa, ZIP diabaikan."
+            exit 0
+          fi
+          shopt -s nullglob nocaseglob
+          zips=(*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "::error::Harus ada settings.gradle.kts atau tepat satu file ZIP di folder utama (ditemukan ${#zips[@]} ZIP)."
+            exit 1
+          fi
+          target="$(mktemp -d)"
+          unzip -q "${zips[0]}" -d "$target"
+          found="$(find "$target" -name settings.gradle.kts -not -path '*/__MACOSX/*' -print -quit)"
+          if [ -z "$found" ]; then
+            echo "::error::settings.gradle.kts tidak ada di dalam ${zips[0]}."
+            exit 1
+          fi
+          cp -a "$(dirname "$found")/." .
+          echo "ZIP ${zips[0]} diekstrak."
+
+      - name: Pasang JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Siapkan Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Build APK debug
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Simpan APK sebagai artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Terbitkan APK di Releases
+        if: github.ref_name == github.event.repository.default_branch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" \
+            app/build/outputs/apk/debug/app-debug.apk \
+            --title "M3T Pod build ${{ github.run_number }}" \
+            --notes "APK debug dari commit ${{ github.sha }}" \
+            --target "${{ github.sha }}" \
+            --latest
